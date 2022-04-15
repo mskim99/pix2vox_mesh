@@ -88,122 +88,60 @@ def test_net(cfg,
     n_samples = len(test_data_loader)
     test_iou = dict()
     L1_losses = utils.network_utils_GAN.AverageMeter()
-    dice_losses = utils.network_utils_GAN.AverageMeter()
-    SSIM_losses = utils.network_utils_GAN.AverageMeter()
-    iou_losses = utils.network_utils_GAN.AverageMeter()
 
     # Switch models to evaluation mode
     generator.eval()
 
     n_batches = len(test_data_loader)
-    for sample_idx, (taxonomy_id, sample_name, rendering_images, ground_truth_volumes, ground_truth_volume_mesh) in enumerate(test_data_loader):
+    for sample_idx, (taxonomy_id, sample_name, rendering_images, ground_truth_volumes, ground_truth_mesh) in enumerate(test_data_loader):
         taxonomy_id = taxonomy_id[0] if isinstance(taxonomy_id[0], str) else taxonomy_id[0].item()
         sample_name = sample_name[0]
 
         with torch.no_grad():
 
-            if volume_scaler is not None and image_scaler is not None:
-                ground_truth_volumes = volume_scaler.transform(ground_truth_volumes.reshape(-1, ground_truth_volumes.shape[-1])).reshape(ground_truth_volumes.shape)
-                rendering_images = image_scaler.transform(rendering_images.reshape(-1, rendering_images.shape[-1])).reshape(rendering_images.shape)
+            rendering_images = rendering_images / 255.
 
-                ground_truth_volumes = torch.from_numpy(ground_truth_volumes).type(torch.FloatTensor)
-                rendering_images = torch.from_numpy(rendering_images).type(torch.FloatTensor)
-            else:
-                ground_truth_volumes = ground_truth_volumes.float() / 255.
-                rendering_images = rendering_images / 255.
+            ground_truth_mesh = ground_truth_mesh.float()
+            ground_truth_mesh = ground_truth_mesh.view([1, 3, -1])
+            gtm_vertice_num = ground_truth_mesh.shape[2]
+
+            if gtm_vertice_num != 1024:
+                v_sub = 1024 - gtm_vertice_num
+                if v_sub > 0:
+                    add_vector = torch.zeros([1, 3, v_sub])
+                    ground_truth_mesh = torch.cat((ground_truth_mesh, add_vector), dim=2)
+                else:
+                    ground_truth_mesh = ground_truth_mesh[:, :, 0:1024]
 
             # Get data from data loader
             rendering_images = utils.network_utils.var_or_cuda(rendering_images)
-            ground_truth_volumes = utils.network_utils.var_or_cuda(ground_truth_volumes)
+            ground_truth_mesh = utils.network_utils.var_or_cuda(ground_truth_mesh)
 
-            ground_truth_volumes = torch.squeeze(ground_truth_volumes)
+            gen_mesh = generator(rendering_images)
 
-            # Proposed GAN Network
-            # gen_volumes = generator(rendering_images)
-
-            # Existing GAN Network
-            noise = torch.randn((1, 1000, 1, 1, 1)).cuda()
-            gen_volumes = generator(noise)
-
-            ground_truth_volumes = torch.clamp(ground_truth_volumes, 0.0, 1.0)
-            gen_volumes = torch.clamp(gen_volumes, 0.0, 1.0)
-
-            dice_loss = utils.loss_function.dice_loss(gen_volumes, ground_truth_volumes, 0.29)
-            L2_loss = mse_loss(gen_volumes, ground_truth_volumes)
-            L1_loss = l1_loss(gen_volumes, ground_truth_volumes)
-            SSIM_loss = utils.loss_function.ssim_loss_volume(gen_volumes, ground_truth_volumes)
-            # SSIM_loss = 0.5 - SSIM_loss
-
-            sample_iou = []
-            for th in cfg.TEST.VOXEL_THRESH:
-                _volume = torch.ge(gen_volumes, th).float()
-                _gt_volume = torch.ge(ground_truth_volumes, th).float()
-                intersection = torch.sum(torch.ge(_volume.mul(_gt_volume), 1)).float()
-                union = torch.sum(torch.ge(_volume.add(_gt_volume), 1)).float()
-                sample_iou.append((intersection / union).item())
-
-            iou_loss = sum(sample_iou) / len(sample_iou)
-            iou_loss = 0.5 - iou_loss
+            L2_loss = mse_loss(gen_mesh, ground_truth_mesh)
+            L1_loss = l1_loss(gen_mesh, ground_truth_mesh)
 
             # Append loss to average metrics
             L1_losses.update(L1_loss.item())
-            dice_losses.update(dice_loss.item())
-            SSIM_losses.update(SSIM_loss.item())
-            iou_losses.update(iou_loss)
 
             # Volume Visualization
+            '''
             gv = gen_volumes.cpu().numpy()            
             np.save('./output/voxel2/gv/gv_' + str(sample_idx).zfill(6) + '.npy', gv)
             gtv = ground_truth_volumes.cpu().numpy()
             np.save('./output/voxel2/gtv/gtv_' + str(sample_idx).zfill(6) + '.npy', gtv)
+            '''
 
-            # IoU per taxonomy
-            if taxonomy_id not in test_iou:
-                test_iou[taxonomy_id] = {'n_samples': 0, 'iou': []}
-            test_iou[taxonomy_id]['n_samples'] += 1
-            test_iou[taxonomy_id]['iou'].append(sample_iou)
+            print('[INFO] %s Test[%d/%d] Taxonomy = %s Sample = %s L1Loss = %.6f'
+                  % (dt.now(), sample_idx + 1, n_samples, taxonomy_id, sample_name, L1_loss.item()))
 
-            print('[INFO] %s Test[%d/%d] Taxonomy = %s Sample = %s IoULoss = %.6f SSIMLoss = %.6f L1Loss = %.6f IoU = %s'
-                  % (dt.now(), sample_idx + 1, n_samples, taxonomy_id, sample_name, iou_loss, SSIM_loss.item(), L1_loss.item(),
-                     ['%.4f' % si for si in sample_iou]))
-
-    print('[INFO] %s Test[%d] Loss Mean / IoULoss = %.6f SSIMLoss = %.6f L1Loss = %.6f'
-          % (dt.now(), n_samples, iou_losses.avg, SSIM_losses.avg, L1_losses.avg))
-
-    # Output testing results
-    mean_iou = []
-    for taxonomy_id in test_iou:
-        test_iou[taxonomy_id]['iou'] = np.mean(test_iou[taxonomy_id]['iou'], axis=0)
-        mean_iou.append(test_iou[taxonomy_id]['iou'] * test_iou[taxonomy_id]['n_samples'])
-    mean_iou = np.sum(mean_iou, axis=0) / n_samples
-
-    # Print header
-    print('============================ TEST RESULTS ============================')
-    print('Taxonomy', end='\t')
-    print('#Sample', end='\t')
-    print('Baseline', end='\t')
-    for th in cfg.TEST.VOXEL_THRESH:
-        print('t=%.2f' % th, end='\t')
-    print()
-    # Print body
-    for taxonomy_id in test_iou:
-        print('%s' % taxonomies[taxonomy_id]['taxonomy_name'].ljust(8), end='\t')
-        print('%d' % test_iou[taxonomy_id]['n_samples'], end='\t')
-        if 'baseline' in taxonomies[taxonomy_id]:
-            print('%.4f' % taxonomies[taxonomy_id]['baseline']['%d-view' % cfg.CONST.N_VIEWS_RENDERING], end='\t\t')
-        else:
-            print('N/a', end='\t\t')
-
-        for ti in test_iou[taxonomy_id]['iou']:
-            print('%.4f' % ti, end='\t')
-        print('\n')
+    print('[INFO] %s Test[%d] Loss Mean / L1Loss = %.6f'
+          % (dt.now(), n_samples, L1_losses.avg))
 
     # Add testing results to TensorBoard
-    max_iou = np.max(mean_iou)
     if test_writer is not None:
-        test_writer.add_scalar('Generator/DiceLoss', dice_losses.avg, epoch_idx)
-        test_writer.add_scalar('Generator/SSIMLoss', SSIM_losses.avg, epoch_idx)
         test_writer.add_scalar('Generator/L1Loss', L1_losses.avg, epoch_idx)
 
-    return test_iou[taxonomy_id]['iou'][2] # t = 0.40
+    return 0.0 # t = 0.40
     # return min_loss

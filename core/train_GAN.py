@@ -212,15 +212,25 @@ def train_net(cfg):
             data_time.update(time() - batch_end_time)
 
             rendering_images = rendering_images.float() / 255.
+            ground_truth_mesh = ground_truth_mesh.float()
 
             # Get data from data loader
-            ground_truth_mesh = utils.network_utils_GAN.var_or_cuda(ground_truth_mesh)
-            rendering_images = utils.network_utils_GAN.var_or_cuda(rendering_images)
-
             ground_truth_mesh = ground_truth_mesh.view([1, 3, -1])
             gtm_vertice_num = ground_truth_mesh.shape[2]
-            print(ground_truth_mesh.size())
-            print(gtm_vertice_num)
+
+            if gtm_vertice_num != 1024:
+                v_sub = 1024 - gtm_vertice_num
+                if v_sub > 0:
+                    add_vector = torch.zeros([1, 3, v_sub])
+                    ground_truth_mesh = torch.cat((ground_truth_mesh, add_vector), dim=2)
+                else:
+                    ground_truth_mesh = ground_truth_mesh[:, :, 0:1024]
+
+            gtm_vertice_num = ground_truth_mesh.shape[2]
+            # print(ground_truth_mesh.size())
+
+            ground_truth_mesh = utils.network_utils_GAN.var_or_cuda(ground_truth_mesh)
+            rendering_images = utils.network_utils_GAN.var_or_cuda(rendering_images)
 
             if batch_idx % dis_batch == 0:
                 dis_update = True
@@ -234,12 +244,12 @@ def train_net(cfg):
             # Proposed GAN Network
             gen_mesh = generator(rendering_images).detach()
             L1_loss = l1_loss(ground_truth_mesh, gen_mesh)
-            print(L1_loss)
+            # print(L1_loss)
             # Proposed GAN Network
             discriminator_loss = - torch.mean(discriminator(gen_mesh)) \
                                  + torch.mean(discriminator(ground_truth_mesh))
             
-            discriminator_loss = discriminator_loss + 4. * L1_loss
+            discriminator_loss = discriminator_loss + 0.0005 * L1_loss
 
             if dis_update:
                 if gen_update:
@@ -257,11 +267,11 @@ def train_net(cfg):
             if gen_update:
                 generator_solver.zero_grad()
 
-            gen_mesh = generator(rendering_images, gtm_vertice_num)
+            gen_mesh = generator(rendering_images)
             L1_loss = l1_loss(gen_mesh, ground_truth_mesh)
 
             generator_loss = -torch.mean(discriminator(gen_mesh))
-            generator_loss = generator_loss + 4. * L1_loss
+            generator_loss = generator_loss + 0.0005 * L1_loss
 
             if gen_update:
                 generator_loss.backward()
@@ -331,34 +341,6 @@ def train_net(cfg):
             utils.network_utils_GAN.save_checkpoints(cfg, './output/logs/checkpoints/ckpt-epoch-%04d.pth' % (epoch_idx + 1),
                                                  epoch_idx + 1, generator, generator_solver,
                                                  discriminator, discriminator_solver, volume_scaler, image_scaler)
-
-        # Output testing results
-        mean_iou = []
-        for taxonomy_id in test_iou:
-            test_iou[taxonomy_id]['iou'] = np.mean(test_iou[taxonomy_id]['iou'], axis=0)
-            mean_iou.append(test_iou[taxonomy_id]['iou'] * test_iou[taxonomy_id]['n_samples'])
-        mean_iou = np.sum(mean_iou, axis=0) / cfg.TRAIN.NUM_EPOCHES
-
-        # Print header
-        print('============================ TRAIN RESULTS ============================')
-        print('Taxonomy', end='\t')
-        print('#Sample', end='\t')
-        print('Baseline', end='\t')
-        for th in cfg.TEST.VOXEL_THRESH:
-            print('t=%.2f' % th, end='\t')
-        print()
-        # Print body
-        for taxonomy_id in test_iou:
-            print('%s' % taxonomies[taxonomy_id]['taxonomy_name'].ljust(8), end='\t')
-            print('%d' % test_iou[taxonomy_id]['n_samples'], end='\t')
-            if 'baseline' in taxonomies[taxonomy_id]:
-                print('%.4f' % taxonomies[taxonomy_id]['baseline']['%d-view' % cfg.CONST.N_VIEWS_RENDERING], end='\t\t')
-            else:
-                print('N/a', end='\t\t')
-
-            for ti in test_iou[taxonomy_id]['iou']:
-                print('%.4f' % ti, end='\t')
-        print('\n')
 
     # Close SummaryWriter for TensorBoard
     train_writer.close()
